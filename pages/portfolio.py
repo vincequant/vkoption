@@ -176,6 +176,8 @@ def ensure_state() -> None:
         st.session_state.holdings_loaded = False
     if "portfolio_limit_hkd" not in st.session_state:
         st.session_state.portfolio_limit_hkd = DEFAULT_PORTFOLIO_LIMIT_HKD
+    if "include_short_side_negative" not in st.session_state:
+        st.session_state.include_short_side_negative = False
     if not st.session_state.holdings_loaded:
         loaded = load_holdings_from_disk()
         st.session_state.options_holdings = loaded
@@ -338,31 +340,46 @@ def fetch_single_price(symbol: str, market: str, api_key: str) -> float | None:
         return None
 
 
-def portfolio_summary(holdings: List[Dict]) -> Dict[str, float]:
+def portfolio_summary(holdings: List[Dict], include_short_side_negative: bool = False) -> Dict[str, float]:
     stock_long_hkd = 0.0
     stock_short_hkd = 0.0
     itm_short_put_hkd = 0.0
     itm_short_call_hkd = 0.0
-    virtual_risk_hkd = 0.0
+    put_virtual_risk_hkd = 0.0
+    call_virtual_risk_hkd = 0.0
+    short_stock_virtual_hkd = 0.0
     for item in holdings:
         position_type = item.get("position_type", "short_put")
         if position_type == "stock_long":
             stock_long_hkd += abs(stock_value_hkd(item))
         elif position_type == "stock_sell":
-            stock_short_hkd += abs(stock_value_hkd(item))
+            short_abs = abs(stock_value_hkd(item))
+            stock_short_hkd += short_abs
+            short_stock_virtual_hkd += short_abs
         elif position_type == "short_put":
-            virtual_risk_hkd += option_notional_hkd(item)
+            put_virtual_risk_hkd += option_notional_hkd(item)
             if is_itm_short_put(item):
                 itm_short_put_hkd += option_notional_hkd(item)
         elif position_type == "short_call":
-            virtual_risk_hkd += option_notional_hkd(item)
+            call_virtual_risk_hkd += option_notional_hkd(item)
             if is_itm_short_call(item):
                 itm_short_call_hkd += option_notional_hkd(item)
+
+    if include_short_side_negative:
+        total_value_hkd = stock_long_hkd + itm_short_put_hkd - itm_short_call_hkd - stock_short_hkd
+        virtual_risk_hkd = put_virtual_risk_hkd - call_virtual_risk_hkd - short_stock_virtual_hkd
+    else:
+        total_value_hkd = stock_long_hkd + itm_short_put_hkd
+        virtual_risk_hkd = put_virtual_risk_hkd
+
     return {
-        "total_value_hkd": stock_long_hkd + itm_short_put_hkd - itm_short_call_hkd - stock_short_hkd,
+        "total_value_hkd": total_value_hkd,
         "virtual_risk_hkd": virtual_risk_hkd,
         "itm_short_put_hkd": itm_short_put_hkd,
         "itm_short_call_hkd": itm_short_call_hkd,
+        "put_virtual_risk_hkd": put_virtual_risk_hkd,
+        "call_virtual_risk_hkd": call_virtual_risk_hkd,
+        "short_stock_virtual_hkd": short_stock_virtual_hkd,
         "stock_long_hkd": stock_long_hkd,
         "stock_short_hkd": stock_short_hkd,
         "long_bucket_hkd": stock_long_hkd + itm_short_put_hkd,
@@ -537,7 +554,16 @@ st.markdown(
 
 ensure_state()
 
-st.title("期权 + 正股组合")
+top_left, top_right = st.columns([0.7, 0.3])
+with top_left:
+    st.title("期权 + 正股组合")
+with top_right:
+    st.toggle(
+        "计入空头负值",
+        key="include_short_side_negative",
+        help="关闭(默认)：不计入 Short Call/沽空正股；开启：作为负值计入两项市值。",
+    )
+
 last_updated = st.session_state.last_updated or "--"
 st.caption(f"最后更新：{last_updated}")
 st.caption(f"本地保存：{st.session_state.last_saved or '--'}")
@@ -559,7 +585,10 @@ with st.sidebar:
         st.session_state.portfolio_limit_hkd = float(limit_val)
         save_holdings_to_disk()
 
-summary = portfolio_summary(st.session_state.options_holdings)
+summary = portfolio_summary(
+    st.session_state.options_holdings,
+    include_short_side_negative=bool(st.session_state.get("include_short_side_negative", False)),
+)
 
 st.markdown(
     f"""
@@ -580,8 +609,12 @@ st.markdown(
 )
 
 with st.expander("市值拆分明细 (HKD)", expanded=False):
+    mode_text = "已计入 Short Call + 沽空正股负值" if st.session_state.get("include_short_side_negative") else "未计入 Short Call + 沽空正股负值（默认）"
     st.markdown(
         f"""
+**当前口径**
+- `{mode_text}`
+
 **组合总市值拆分**
 - `Short Put + 正股(买入)`：`HK${summary['long_bucket_hkd']:,.2f}`
   - 其中 正股(买入)：`HK${summary['stock_long_hkd']:,.2f}`
@@ -591,7 +624,10 @@ with st.expander("市值拆分明细 (HKD)", expanded=False):
   - 其中 沽空正股：`HK${summary['stock_short_hkd']:,.2f}`
 
 **虚拟风险市值拆分**
-- `全部 Short Put + Short Call 名义风险`：`HK${summary['virtual_risk_hkd']:,.2f}`
+- `Short Put 名义风险`：`HK${summary['put_virtual_risk_hkd']:,.2f}`
+- `Short Call 名义风险`：`HK${summary['call_virtual_risk_hkd']:,.2f}`
+- `沽空正股虚拟值`：`HK${summary['short_stock_virtual_hkd']:,.2f}`
+- `最终虚拟风险市值`：`HK${summary['virtual_risk_hkd']:,.2f}`
 """
     )
 
