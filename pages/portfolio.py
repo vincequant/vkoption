@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,9 @@ OPTION_CONTRACT_SIZE = 100
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 STORAGE_FILE = DATA_DIR / "options_portfolio.json"
 POSITION_TYPE_CHOICES = ["short_put", "short_call", "stock_long", "stock_sell"]
+DEFAULT_PORTFOLIO_LIMIT_HKD = 30_000_000.0
+DEFAULT_USD_HKD = 7.80
+DEFAULT_CNY_HKD = 1.08
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -54,6 +58,83 @@ def position_direction(position_type: str) -> int:
     return -1 if position_type == "stock_sell" else 1
 
 
+def market_to_hkd_rate(market: str) -> float:
+    if market == "us":
+        return DEFAULT_USD_HKD
+    if market == "cn":
+        return DEFAULT_CNY_HKD
+    return 1.0
+
+
+def holding_value_hkd(item: Dict, fallback_to_strike: bool = True) -> float:
+    qty = float(item.get("quantity", 0) or 0)
+    multiplier = position_multiplier(item.get("position_type", "short_put"))
+    direction = position_direction(item.get("position_type", "short_put"))
+    market = item.get("market") or infer_market(item.get("symbol", ""))
+    current = item.get("current_price")
+    strike = float(item.get("strike_price", 0) or 0)
+
+    price = float(current) if isinstance(current, (int, float)) else (strike if fallback_to_strike else 0.0)
+    return price * qty * multiplier * direction * market_to_hkd_rate(market)
+
+
+def portfolio_total_hkd(holdings: List[Dict], fallback_to_strike: bool = True) -> float:
+    return sum(holding_value_hkd(item, fallback_to_strike=fallback_to_strike) for item in holdings)
+
+
+def short_put_assignment_hkd(item: Dict) -> float:
+    position_type = item.get("position_type", "short_put")
+    if position_type != "short_put":
+        return 0.0
+    qty = float(item.get("quantity", 0) or 0)
+    strike = float(item.get("strike_price", 0) or 0)
+    market = item.get("market") or infer_market(item.get("symbol", ""))
+    return strike * qty * OPTION_CONTRACT_SIZE * market_to_hkd_rate(market)
+
+
+def short_put_assignment_total_hkd(holdings: List[Dict]) -> float:
+    return sum(short_put_assignment_hkd(item) for item in holdings)
+
+
+def option_notional_hkd(item: Dict) -> float:
+    position_type = item.get("position_type", "short_put")
+    if position_type not in {"short_put", "short_call"}:
+        return 0.0
+    qty = float(item.get("quantity", 0) or 0)
+    strike = float(item.get("strike_price", 0) or 0)
+    market = item.get("market") or infer_market(item.get("symbol", ""))
+    return strike * qty * OPTION_CONTRACT_SIZE * market_to_hkd_rate(market)
+
+
+def is_itm_short_put(item: Dict) -> bool:
+    if item.get("position_type") != "short_put":
+        return False
+    current = item.get("current_price")
+    strike = float(item.get("strike_price", 0) or 0)
+    return isinstance(current, (int, float)) and float(current) <= strike
+
+
+def is_itm_short_call(item: Dict) -> bool:
+    if item.get("position_type") != "short_call":
+        return False
+    current = item.get("current_price")
+    strike = float(item.get("strike_price", 0) or 0)
+    return isinstance(current, (int, float)) and float(current) >= strike
+
+
+def stock_value_hkd(item: Dict) -> float:
+    position_type = item.get("position_type", "short_put")
+    if position_type not in {"stock_long", "stock_sell"}:
+        return 0.0
+    market = item.get("market") or infer_market(item.get("symbol", ""))
+    qty = float(item.get("quantity", 0) or 0)
+    direction = position_direction(position_type)
+    current = item.get("current_price")
+    strike = float(item.get("strike_price", 0) or 0)
+    price = float(current) if isinstance(current, (int, float)) else strike
+    return price * qty * direction * market_to_hkd_rate(market)
+
+
 def fmp_symbol_candidates(symbol: str, market: str) -> List[str]:
     normalized = normalize_symbol(symbol)
     candidates: List[str] = [normalized]
@@ -93,6 +174,8 @@ def ensure_state() -> None:
         st.session_state.last_saved = None
     if "holdings_loaded" not in st.session_state:
         st.session_state.holdings_loaded = False
+    if "portfolio_limit_hkd" not in st.session_state:
+        st.session_state.portfolio_limit_hkd = DEFAULT_PORTFOLIO_LIMIT_HKD
     if not st.session_state.holdings_loaded:
         loaded = load_holdings_from_disk()
         st.session_state.options_holdings = loaded
@@ -109,10 +192,13 @@ def load_holdings_from_disk() -> List[Dict]:
         items = payload.get("holdings", [])
         last_updated = payload.get("last_updated")
         last_saved = payload.get("last_saved")
+        portfolio_limit_hkd = payload.get("portfolio_limit_hkd")
         if isinstance(last_updated, str):
             st.session_state.last_updated = last_updated
         if isinstance(last_saved, str):
             st.session_state.last_saved = last_saved
+        if isinstance(portfolio_limit_hkd, (int, float)):
+            st.session_state.portfolio_limit_hkd = float(portfolio_limit_hkd)
         if isinstance(items, list):
             cleaned = []
             for item in items:
@@ -147,6 +233,7 @@ def save_holdings_to_disk() -> None:
     payload = {
         "last_updated": st.session_state.last_updated,
         "last_saved": now_str,
+        "portfolio_limit_hkd": float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD)),
         "holdings": st.session_state.options_holdings,
     }
     STORAGE_FILE.write_text(
@@ -252,22 +339,34 @@ def fetch_single_price(symbol: str, market: str, api_key: str) -> float | None:
 
 
 def portfolio_summary(holdings: List[Dict]) -> Dict[str, float]:
-    total_value = 0.0
-    assignment_value = 0.0
+    stock_long_hkd = 0.0
+    stock_short_hkd = 0.0
+    itm_short_put_hkd = 0.0
+    itm_short_call_hkd = 0.0
+    virtual_risk_hkd = 0.0
     for item in holdings:
-        qty = float(item.get("quantity", 0) or 0)
-        strike = float(item.get("strike_price", 0) or 0)
         position_type = item.get("position_type", "short_put")
-        multiplier = position_multiplier(position_type)
-        direction = position_direction(position_type)
-        current = item.get("current_price")
-        if isinstance(current, (int, float)):
-            total_value += float(current) * qty * multiplier * direction
-        if position_type == "short_put":
-            assignment_value += strike * qty * OPTION_CONTRACT_SIZE
+        if position_type == "stock_long":
+            stock_long_hkd += abs(stock_value_hkd(item))
+        elif position_type == "stock_sell":
+            stock_short_hkd += abs(stock_value_hkd(item))
+        elif position_type == "short_put":
+            virtual_risk_hkd += option_notional_hkd(item)
+            if is_itm_short_put(item):
+                itm_short_put_hkd += option_notional_hkd(item)
+        elif position_type == "short_call":
+            virtual_risk_hkd += option_notional_hkd(item)
+            if is_itm_short_call(item):
+                itm_short_call_hkd += option_notional_hkd(item)
     return {
-        "total_value": total_value,
-        "assignment_value": assignment_value,
+        "total_value_hkd": stock_long_hkd + itm_short_put_hkd - itm_short_call_hkd - stock_short_hkd,
+        "virtual_risk_hkd": virtual_risk_hkd,
+        "itm_short_put_hkd": itm_short_put_hkd,
+        "itm_short_call_hkd": itm_short_call_hkd,
+        "stock_long_hkd": stock_long_hkd,
+        "stock_short_hkd": stock_short_hkd,
+        "long_bucket_hkd": stock_long_hkd + itm_short_put_hkd,
+        "short_bucket_hkd": itm_short_call_hkd + stock_short_hkd,
         "count": len(holdings),
     }
 
@@ -287,6 +386,58 @@ def add_holding(symbol: str, quantity: int, strike_price: float, position_type: 
         }
     )
     save_holdings_to_disk()
+
+
+def check_portfolio_limit_for_new_holding(symbol: str, quantity: int, strike_price: float, position_type: str) -> tuple[bool, str]:
+    portfolio_limit_hkd = float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD))
+    current_assignment_hkd = short_put_assignment_total_hkd(st.session_state.options_holdings)
+    new_item = {
+        "symbol": normalize_symbol(symbol),
+        "market": infer_market(symbol),
+        "quantity": int(quantity),
+        "strike_price": float(strike_price),
+        "position_type": position_type,
+        "current_price": None,
+    }
+    add_assignment_hkd = short_put_assignment_hkd(new_item)
+    projected_assignment_hkd = current_assignment_hkd + add_assignment_hkd
+
+    if projected_assignment_hkd <= portfolio_limit_hkd:
+        return True, ""
+
+    if position_type != "short_put":
+        return False, (
+            f"当前 Short Put 接盘总市值已达 HK${current_assignment_hkd:,.0f}，超过上限 HK${portfolio_limit_hkd:,.0f}。\n"
+            "可选处理：\n"
+            "1) 在侧边栏提高组合上限\n"
+            "2) 先降低或移除部分 Short Put 持仓"
+        )
+
+    per_qty_hkd = short_put_assignment_hkd(
+        {
+            "symbol": normalize_symbol(symbol),
+            "market": infer_market(symbol),
+            "quantity": 1,
+            "strike_price": float(strike_price),
+            "position_type": "short_put",
+        }
+    )
+
+    if per_qty_hkd <= 0:
+        return False, (
+            f"新增后预计 Short Put 接盘总市值 HK${projected_assignment_hkd:,.0f} 超过上限 HK${portfolio_limit_hkd:,.0f}。"
+            "当前新增类型不会降低上限风险，请调整价格/类型。"
+        )
+
+    remaining_hkd = portfolio_limit_hkd - current_assignment_hkd
+    recommended_max_qty = max(0, math.floor(remaining_hkd / per_qty_hkd))
+    required_limit = projected_assignment_hkd
+    return False, (
+        f"新增后预计 Short Put 接盘总市值 HK${projected_assignment_hkd:,.0f}，超过上限 HK${portfolio_limit_hkd:,.0f}。\n"
+        "可选处理：\n"
+        f"1) 降低新增手数：把 {quantity} 调整为 {recommended_max_qty}（或更低）\n"
+        f"2) 提高组合上限：至少调到 HK${required_limit:,.0f}"
+    )
 
 
 def update_prices() -> None:
@@ -390,6 +541,7 @@ st.title("期权 + 正股组合")
 last_updated = st.session_state.last_updated or "--"
 st.caption(f"最后更新：{last_updated}")
 st.caption(f"本地保存：{st.session_state.last_saved or '--'}")
+st.caption(f"组合上限：HK${float(st.session_state.get('portfolio_limit_hkd', DEFAULT_PORTFOLIO_LIMIT_HKD)):,.0f}")
 
 with st.sidebar:
     st.subheader("数据源设置")
@@ -397,20 +549,27 @@ with st.sidebar:
     st.session_state.fmp_api_key = st.text_input(
         "FMP API Key", value=default_key, type="password", help="优先读取 secrets 或环境变量。"
     )
+    limit_val = st.number_input(
+        "组合上限 (HKD)",
+        min_value=100_000.0,
+        value=float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD)),
+        step=100_000.0,
+    )
+    if float(limit_val) != float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD)):
+        st.session_state.portfolio_limit_hkd = float(limit_val)
+        save_holdings_to_disk()
 
 summary = portfolio_summary(st.session_state.options_holdings)
-currency_symbols = {market_currency_symbol(h["market"]) for h in st.session_state.options_holdings}
-summary_currency = currency_symbols.pop() if len(currency_symbols) == 1 else "$"
 
 st.markdown(
     f"""
 <div class="metric-card">
-    <div class="metric-label">组合总市值</div>
-    <div class="metric-value">{summary_currency}{summary['total_value']:,.2f}</div>
+    <div class="metric-label">组合总市值 (风险调整, HKD)</div>
+    <div class="metric-value">HK${summary['total_value_hkd']:,.2f}</div>
 </div>
 <div class="metric-card">
-    <div class="metric-label">Short Put 接盘总市值</div>
-    <div class="metric-value">{summary_currency}{summary['assignment_value']:,.2f}</div>
+    <div class="metric-label">虚拟风险市值 (HKD)</div>
+    <div class="metric-value">HK${summary['virtual_risk_hkd']:,.2f}</div>
 </div>
 <div class="metric-card">
     <div class="metric-label">持仓数</div>
@@ -419,6 +578,22 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+
+with st.expander("市值拆分明细 (HKD)", expanded=False):
+    st.markdown(
+        f"""
+**组合总市值拆分**
+- `Short Put + 正股(买入)`：`HK${summary['long_bucket_hkd']:,.2f}`
+  - 其中 正股(买入)：`HK${summary['stock_long_hkd']:,.2f}`
+  - 其中 入价 Short Put：`HK${summary['itm_short_put_hkd']:,.2f}`
+- `Short Call + 沽空正股`：`HK${summary['short_bucket_hkd']:,.2f}`
+  - 其中 入价 Short Call：`HK${summary['itm_short_call_hkd']:,.2f}`
+  - 其中 沽空正股：`HK${summary['stock_short_hkd']:,.2f}`
+
+**虚拟风险市值拆分**
+- `全部 Short Put + Short Call 名义风险`：`HK${summary['virtual_risk_hkd']:,.2f}`
+"""
+    )
 
 with st.expander("新增持仓", expanded=len(st.session_state.options_holdings) == 0):
     with st.form("add_holding_form", clear_on_submit=True):
@@ -435,9 +610,15 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
             if not normalize_symbol(symbol):
                 st.error("请输入标的代码。")
             else:
-                add_holding(symbol, int(quantity), float(strike_price), position_type)
-                st.success("已添加持仓。")
-                st.rerun()
+                allowed, warning_msg = check_portfolio_limit_for_new_holding(
+                    symbol, int(quantity), float(strike_price), position_type
+                )
+                if not allowed:
+                    st.warning(warning_msg)
+                else:
+                    add_holding(symbol, int(quantity), float(strike_price), position_type)
+                    st.success("已添加持仓。")
+                    st.rerun()
 
 if st.button("更新价格", use_container_width=True):
     update_prices()
@@ -541,7 +722,9 @@ else:
 
         distance_text = "--" if distance_pct is None else f"{distance_pct:+.2f}%"
         assignment_value = strike * qty * multiplier * direction
-        risk = position_type == "short_put" and isinstance(current, (int, float)) and current < strike
+        virtual_risk = option_notional_hkd(item)
+        risk_put = is_itm_short_put(item)
+        risk_call = is_itm_short_call(item)
         qty_unit = "手" if multiplier == OPTION_CONTRACT_SIZE else "股"
 
         expander_title = (
@@ -553,11 +736,12 @@ else:
             st.write(f"最新价: `{currency}{current:,.2f}`" if isinstance(current, (int, float)) else "最新价: `--`")
             st.write(f"最新价距成本/行权价: `{distance_text}`")
             st.write(f"名义成本市值: `{currency}{assignment_value:,.2f}`")
+            st.write(f"虚拟风险市值(HKD): `HK${virtual_risk:,.2f}`")
             st.write("风险状态:")
             st.markdown(
                 "<span class='pill-risk'>Short Put 已跌破行权价</span>"
-                if risk
-                else "<span class='pill-ok'>正常</span>",
+                if risk_put
+                else ("<span class='pill-risk'>Short Call 已升破行权价</span>" if risk_call else "<span class='pill-ok'>正常</span>"),
                 unsafe_allow_html=True,
             )
 
