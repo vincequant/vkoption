@@ -45,12 +45,12 @@ def market_currency_symbol(market: str) -> str:
 
 def position_type_label(position_type: str) -> str:
     labels = {
-        "short_put": "ShortPut",
+        "short_put": "SP",
         "short_call": "Short Call (卖出看涨)",
         "stock_long": "正股（买入）",
         "stock_sell": "正股（卖出）",
     }
-    return labels.get(position_type, "ShortPut")
+    return labels.get(position_type, "SP")
 
 
 def market_label(market: str) -> str:
@@ -701,6 +701,10 @@ st.markdown(
         font-weight: 700;
         border-radius: 12px;
     }
+    div[data-testid="stExpander"] summary p {
+        font-size: 0.86rem;
+        line-height: 1.25;
+    }
 </style>
 """,
     unsafe_allow_html=True,
@@ -944,7 +948,7 @@ else:
 
         expander_title = (
             f"{symbol} | {position_type_label(position_type)} | "
-            f"{currency}{strike:,.2f} x {int(qty)}{qty_unit} | HK${value_hkd:,.0f}"
+            f"{currency}{strike:,.2f} x {int(qty)}{qty_unit} | HKD {value_hkd:,.0f}"
         )
         with st.expander(expander_title, expanded=False):
             st.write(f"市场: `{item['market'].upper()}`")
