@@ -12,6 +12,7 @@ OPTION_CONTRACT_SIZE = 100
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 STORAGE_FILE = DATA_DIR / "options_portfolio.json"
 POSITION_TYPE_CHOICES = ["short_put", "short_call", "stock_long", "stock_sell"]
+MARKET_CHOICES = ["us", "hk", "cn"]
 DEFAULT_PORTFOLIO_LIMIT_HKD = 30_000_000.0
 DEFAULT_USD_HKD = 7.80
 DEFAULT_CNY_HKD = 1.08
@@ -50,6 +51,15 @@ def position_type_label(position_type: str) -> str:
         "stock_sell": "正股（卖出）",
     }
     return labels.get(position_type, "Short Put (卖出看跌)")
+
+
+def market_label(market: str) -> str:
+    labels = {
+        "us": "美股 (US)",
+        "hk": "港股 (HK)",
+        "cn": "A股 (CN)",
+    }
+    return labels.get(market, "美股 (US)")
 
 
 def position_multiplier(position_type: str) -> int:
@@ -497,13 +507,20 @@ def portfolio_summary(holdings: List[Dict], include_short_side_negative: bool = 
     }
 
 
-def add_holding(symbol: str, quantity: int, strike_price: float, position_type: str, contract_multiplier: int) -> None:
+def add_holding(
+    symbol: str,
+    market: str,
+    quantity: int,
+    strike_price: float,
+    position_type: str,
+    contract_multiplier: int,
+) -> None:
     normalized = normalize_symbol(symbol)
     st.session_state.options_holdings.append(
         {
             "id": f"{int(datetime.now().timestamp() * 1000)}_{os.urandom(3).hex()}",
             "symbol": normalized,
-            "market": infer_market(normalized),
+            "market": market if market in MARKET_CHOICES else infer_market(normalized),
             "quantity": int(quantity),
             "strike_price": float(strike_price),
             "position_type": position_type,
@@ -516,13 +533,18 @@ def add_holding(symbol: str, quantity: int, strike_price: float, position_type: 
 
 
 def check_portfolio_limit_for_new_holding(
-    symbol: str, quantity: int, strike_price: float, position_type: str, contract_multiplier: int
+    symbol: str,
+    market: str,
+    quantity: int,
+    strike_price: float,
+    position_type: str,
+    contract_multiplier: int,
 ) -> tuple[bool, str]:
     portfolio_limit_hkd = float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD))
     current_assignment_hkd = short_put_assignment_total_hkd(st.session_state.options_holdings)
     new_item = {
         "symbol": normalize_symbol(symbol),
-        "market": infer_market(symbol),
+        "market": market if market in MARKET_CHOICES else infer_market(symbol),
         "quantity": int(quantity),
         "strike_price": float(strike_price),
         "position_type": position_type,
@@ -546,7 +568,7 @@ def check_portfolio_limit_for_new_holding(
     per_qty_hkd = short_put_assignment_hkd(
         {
             "symbol": normalize_symbol(symbol),
-            "market": infer_market(symbol),
+            "market": market if market in MARKET_CHOICES else infer_market(symbol),
             "quantity": 1,
             "strike_price": float(strike_price),
             "position_type": "short_put",
@@ -751,6 +773,14 @@ with st.expander("市值拆分明细 (HKD)", expanded=False):
 with st.expander("新增持仓", expanded=len(st.session_state.options_holdings) == 0):
     with st.form("add_holding_form", clear_on_submit=True):
         symbol = st.text_input("标的代码", placeholder="例如 NVDA / WDC / 00700.HK")
+        default_market = infer_market(symbol)
+        market = st.selectbox(
+            "市场",
+            options=MARKET_CHOICES,
+            index=MARKET_CHOICES.index(default_market if default_market in MARKET_CHOICES else "us"),
+            format_func=market_label,
+            help="请手动确认市场，避免自动识别误判导致货币换算错误。",
+        )
         position_type = st.selectbox(
             "类型",
             options=POSITION_TYPE_CHOICES,
@@ -773,12 +803,12 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
             else:
                 effective_multiplier = int(contract_multiplier) if position_type in {"short_put", "short_call"} else 1
                 allowed, warning_msg = check_portfolio_limit_for_new_holding(
-                    symbol, int(quantity), float(strike_price), position_type, effective_multiplier
+                    symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier
                 )
                 if not allowed:
                     st.warning(warning_msg)
                 else:
-                    add_holding(symbol, int(quantity), float(strike_price), position_type, effective_multiplier)
+                    add_holding(symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier)
                     st.success("已添加持仓。")
                     st.rerun()
 
@@ -930,6 +960,14 @@ else:
                     format_func=position_type_label,
                     key=f"type_{item['id']}",
                 )
+                current_market = item.get("market") if item.get("market") in MARKET_CHOICES else infer_market(item.get("symbol", ""))
+                new_market = st.selectbox(
+                    "修改市场",
+                    options=MARKET_CHOICES,
+                    index=MARKET_CHOICES.index(current_market if current_market in MARKET_CHOICES else "us"),
+                    format_func=market_label,
+                    key=f"market_{item['id']}",
+                )
                 new_multiplier = st.number_input(
                     "修改期权乘数",
                     min_value=1,
@@ -949,6 +987,7 @@ else:
                     item["quantity"] = int(new_qty)
                     item["strike_price"] = float(new_strike)
                     item["position_type"] = new_type
+                    item["market"] = new_market
                     item["contract_multiplier"] = int(new_multiplier) if new_type in {"short_put", "short_call"} else 1
                     save_holdings_to_disk()
                     st.success("已更新。")
