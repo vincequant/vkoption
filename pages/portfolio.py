@@ -54,6 +54,21 @@ def position_multiplier(position_type: str) -> int:
     return OPTION_CONTRACT_SIZE if position_type in {"short_put", "short_call"} else 1
 
 
+def positive_int_or_default(value: object, default: int) -> int:
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def item_contract_multiplier(item: Dict) -> int:
+    position_type = item.get("position_type", "short_put")
+    default_multiplier = position_multiplier(position_type)
+    raw_multiplier = item.get("contract_multiplier")
+    return positive_int_or_default(raw_multiplier, default_multiplier)
+
+
 def position_direction(position_type: str) -> int:
     return -1 if position_type == "stock_sell" else 1
 
@@ -68,7 +83,7 @@ def market_to_hkd_rate(market: str) -> float:
 
 def holding_value_hkd(item: Dict, fallback_to_strike: bool = True) -> float:
     qty = float(item.get("quantity", 0) or 0)
-    multiplier = position_multiplier(item.get("position_type", "short_put"))
+    multiplier = item_contract_multiplier(item)
     direction = position_direction(item.get("position_type", "short_put"))
     market = item.get("market") or infer_market(item.get("symbol", ""))
     current = item.get("current_price")
@@ -89,7 +104,7 @@ def short_put_assignment_hkd(item: Dict) -> float:
     qty = float(item.get("quantity", 0) or 0)
     strike = float(item.get("strike_price", 0) or 0)
     market = item.get("market") or infer_market(item.get("symbol", ""))
-    return strike * qty * OPTION_CONTRACT_SIZE * market_to_hkd_rate(market)
+    return strike * qty * item_contract_multiplier(item) * market_to_hkd_rate(market)
 
 
 def short_put_assignment_total_hkd(holdings: List[Dict]) -> float:
@@ -103,7 +118,7 @@ def option_notional_hkd(item: Dict) -> float:
     qty = float(item.get("quantity", 0) or 0)
     strike = float(item.get("strike_price", 0) or 0)
     market = item.get("market") or infer_market(item.get("symbol", ""))
-    return strike * qty * OPTION_CONTRACT_SIZE * market_to_hkd_rate(market)
+    return strike * qty * item_contract_multiplier(item) * market_to_hkd_rate(market)
 
 
 def is_itm_short_put(item: Dict) -> bool:
@@ -219,6 +234,9 @@ def load_holdings_from_disk() -> List[Dict]:
                         "quantity": int(item.get("quantity", 1) or 1),
                         "strike_price": float(item.get("strike_price", 0) or 0),
                         "position_type": position_type,
+                        "contract_multiplier": positive_int_or_default(
+                            item.get("contract_multiplier"), position_multiplier(position_type)
+                        ),
                         "current_price": item.get("current_price"),
                         "created_at": item.get("created_at"),
                     }
@@ -388,7 +406,7 @@ def portfolio_summary(holdings: List[Dict], include_short_side_negative: bool = 
     }
 
 
-def add_holding(symbol: str, quantity: int, strike_price: float, position_type: str) -> None:
+def add_holding(symbol: str, quantity: int, strike_price: float, position_type: str, contract_multiplier: int) -> None:
     normalized = normalize_symbol(symbol)
     st.session_state.options_holdings.append(
         {
@@ -398,6 +416,7 @@ def add_holding(symbol: str, quantity: int, strike_price: float, position_type: 
             "quantity": int(quantity),
             "strike_price": float(strike_price),
             "position_type": position_type,
+            "contract_multiplier": int(contract_multiplier),
             "current_price": None,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
@@ -405,7 +424,9 @@ def add_holding(symbol: str, quantity: int, strike_price: float, position_type: 
     save_holdings_to_disk()
 
 
-def check_portfolio_limit_for_new_holding(symbol: str, quantity: int, strike_price: float, position_type: str) -> tuple[bool, str]:
+def check_portfolio_limit_for_new_holding(
+    symbol: str, quantity: int, strike_price: float, position_type: str, contract_multiplier: int
+) -> tuple[bool, str]:
     portfolio_limit_hkd = float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD))
     current_assignment_hkd = short_put_assignment_total_hkd(st.session_state.options_holdings)
     new_item = {
@@ -414,6 +435,7 @@ def check_portfolio_limit_for_new_holding(symbol: str, quantity: int, strike_pri
         "quantity": int(quantity),
         "strike_price": float(strike_price),
         "position_type": position_type,
+        "contract_multiplier": int(contract_multiplier),
         "current_price": None,
     }
     add_assignment_hkd = short_put_assignment_hkd(new_item)
@@ -437,6 +459,7 @@ def check_portfolio_limit_for_new_holding(symbol: str, quantity: int, strike_pri
             "quantity": 1,
             "strike_price": float(strike_price),
             "position_type": "short_put",
+            "contract_multiplier": int(contract_multiplier),
         }
     )
 
@@ -640,19 +663,28 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
             format_func=position_type_label,
         )
         quantity = st.number_input("数量（期权填手数，股票填股数）", min_value=1, value=1, step=1)
+        contract_multiplier = st.number_input(
+            "期权乘数（默认100，可手动修改）",
+            min_value=1,
+            value=OPTION_CONTRACT_SIZE,
+            step=1,
+            help="仅对 Short Put / Short Call 生效；正股类型固定按 1 计算。",
+            disabled=(position_type in {"stock_long", "stock_sell"}),
+        )
         strike_price = st.number_input("行权价 / 成本价", min_value=0.01, value=100.0, step=0.01)
         submitted = st.form_submit_button("添加持仓")
         if submitted:
             if not normalize_symbol(symbol):
                 st.error("请输入标的代码。")
             else:
+                effective_multiplier = int(contract_multiplier) if position_type in {"short_put", "short_call"} else 1
                 allowed, warning_msg = check_portfolio_limit_for_new_holding(
-                    symbol, int(quantity), float(strike_price), position_type
+                    symbol, int(quantity), float(strike_price), position_type, effective_multiplier
                 )
                 if not allowed:
                     st.warning(warning_msg)
                 else:
-                    add_holding(symbol, int(quantity), float(strike_price), position_type)
+                    add_holding(symbol, int(quantity), float(strike_price), position_type, effective_multiplier)
                     st.success("已添加持仓。")
                     st.rerun()
 
@@ -748,7 +780,7 @@ else:
         qty = float(item["quantity"])
         strike = float(item["strike_price"])
         position_type = item.get("position_type", "short_put")
-        multiplier = position_multiplier(position_type)
+        multiplier = item_contract_multiplier(item)
         direction = position_direction(position_type)
         current = item.get("current_price")
         currency = market_currency_symbol(item["market"])
@@ -761,7 +793,7 @@ else:
         virtual_risk = option_notional_hkd(item)
         risk_put = is_itm_short_put(item)
         risk_call = is_itm_short_call(item)
-        qty_unit = "手" if multiplier == OPTION_CONTRACT_SIZE else "股"
+        qty_unit = "手" if position_type in {"short_put", "short_call"} else "股"
 
         expander_title = (
             f"{symbol} | {position_type_label(position_type)} | "
@@ -772,6 +804,7 @@ else:
             st.write(f"最新价: `{currency}{current:,.2f}`" if isinstance(current, (int, float)) else "最新价: `--`")
             st.write(f"最新价距成本/行权价: `{distance_text}`")
             st.write(f"名义成本市值: `{currency}{assignment_value:,.2f}`")
+            st.write(f"合约乘数: `{multiplier}`")
             st.write(f"虚拟风险市值(HKD): `HK${virtual_risk:,.2f}`")
             st.write("风险状态:")
             st.markdown(
@@ -803,6 +836,15 @@ else:
                     format_func=position_type_label,
                     key=f"type_{item['id']}",
                 )
+                new_multiplier = st.number_input(
+                    "修改期权乘数",
+                    min_value=1,
+                    value=int(item_contract_multiplier(item)),
+                    step=1,
+                    key=f"multiplier_{item['id']}",
+                    help="仅对 Short Put / Short Call 生效；正股类型固定按 1 计算。",
+                    disabled=(new_type in {"stock_long", "stock_sell"}),
+                )
                 save_col, del_col = st.columns(2)
                 with save_col:
                     save_clicked = st.form_submit_button("保存修改")
@@ -813,6 +855,7 @@ else:
                     item["quantity"] = int(new_qty)
                     item["strike_price"] = float(new_strike)
                     item["position_type"] = new_type
+                    item["contract_multiplier"] = int(new_multiplier) if new_type in {"short_put", "short_call"} else 1
                     save_holdings_to_disk()
                     st.success("已更新。")
                     st.rerun()
