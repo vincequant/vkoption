@@ -7,5 +7,4 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-st.title("VK Option")
-st.write("在左侧 `Pages` 中打开 `Portfolio` 页面。")
+st.switch_page("pages/portfolio.py")
