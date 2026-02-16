@@ -165,19 +165,24 @@ def stock_value_hkd(item: Dict) -> float:
 def holding_value_for_sort_hkd(item: Dict) -> float:
     position_type = item.get("position_type", "short_put")
     if position_type == "short_put":
-        return abs(short_put_assignment_hkd(item))
+        return short_put_assignment_hkd(item)
     if position_type == "short_call":
-        return abs(option_notional_hkd(item))
-    return abs(stock_value_hkd(item))
+        return option_notional_hkd(item)
+    return stock_value_hkd(item)
 
 
 def holding_value_label_hkd(item: Dict) -> tuple[str, float]:
     position_type = item.get("position_type", "short_put")
     if position_type == "short_put":
-        return "Short接盘市值(HKD)", abs(short_put_assignment_hkd(item))
+        return "Short接盘市值(HKD)", short_put_assignment_hkd(item)
     if position_type == "short_call":
-        return "Short名义市值(HKD)", abs(option_notional_hkd(item))
-    return "正股现价市值(HKD)", abs(stock_value_hkd(item))
+        return "Short名义市值(HKD)", option_notional_hkd(item)
+    return "正股现价市值(HKD)", stock_value_hkd(item)
+
+
+def colored_hkd_markdown(value: float) -> str:
+    color = "red" if value < 0 else "green"
+    return f":{color}[HKD {value:,.0f}]"
 
 
 def fmp_symbol_candidates(symbol: str, market: str) -> List[str]:
@@ -917,7 +922,7 @@ else:
     sort_mode = st.selectbox(
         "市值排序",
         options=["默认顺序", "市值从高到低", "市值从低到高"],
-        index=0,
+        index=1,
         key="holding_sort_mode",
     )
     holdings_to_show = list(st.session_state.options_holdings)
@@ -948,14 +953,14 @@ else:
 
         expander_title = (
             f"{symbol} | {position_type_label(position_type)} | "
-            f"{currency}{strike:,.2f} x {int(qty)}{qty_unit} | HKD {value_hkd:,.0f}"
+            f"{currency}{strike:,.2f} x {int(qty)}{qty_unit} | {colored_hkd_markdown(value_hkd)}"
         )
         with st.expander(expander_title, expanded=False):
             st.write(f"市场: `{item['market'].upper()}`")
             st.write(f"最新价: `{currency}{current:,.2f}`" if isinstance(current, (int, float)) else "最新价: `--`")
             st.write(f"最新价距成本/行权价: `{distance_text}`")
             st.write(f"名义成本市值: `{currency}{assignment_value:,.2f}`")
-            st.write(f"{value_label}: `HK${value_hkd:,.2f}`")
+            st.markdown(f"{value_label}: {colored_hkd_markdown(value_hkd)}")
             st.write(f"合约乘数: `{multiplier}`")
             st.write(f"虚拟风险市值(HKD): `HK${virtual_risk:,.2f}`")
             st.write("风险状态:")
