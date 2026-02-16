@@ -728,13 +728,13 @@ summary = portfolio_summary(
     st.session_state.options_holdings,
     include_short_side_negative=bool(st.session_state.get("include_short_side_negative", False)),
 )
+portfolio_limit_hkd = float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD))
+virtual_risk_hkd = float(summary["virtual_risk_hkd"])
+risk_ratio = (virtual_risk_hkd / portfolio_limit_hkd) if portfolio_limit_hkd > 0 else 0.0
+risk_ratio_clamped = min(max(risk_ratio, 0.0), 1.0)
 
 st.markdown(
     f"""
-<div class="metric-card">
-    <div class="metric-label">组合总市值 (风险调整, HKD)</div>
-    <div class="metric-value">HK${summary['total_value_hkd']:,.2f}</div>
-</div>
 <div class="metric-card">
     <div class="metric-label">虚拟风险市值 (HKD)</div>
     <div class="metric-value">HK${summary['virtual_risk_hkd']:,.2f}</div>
@@ -746,21 +746,14 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
+st.progress(risk_ratio_clamped, text=f"风险进度：{risk_ratio * 100:.2f}%（HK${virtual_risk_hkd:,.0f} / HK${portfolio_limit_hkd:,.0f}）")
 
-with st.expander("市值拆分明细 (HKD)", expanded=False):
+with st.expander("虚拟风险拆分明细 (HKD)", expanded=False):
     mode_text = "已计入 Short Call + 沽空正股负值" if st.session_state.get("include_short_side_negative") else "未计入 Short Call + 沽空正股负值（默认）"
     st.markdown(
         f"""
 **当前口径**
 - `{mode_text}`
-
-**组合总市值拆分**
-- `Short Put + 正股(买入)`：`HK${summary['long_bucket_hkd']:,.2f}`
-  - 其中 正股(买入)：`HK${summary['stock_long_hkd']:,.2f}`
-  - 其中 入价 Short Put：`HK${summary['itm_short_put_hkd']:,.2f}`
-- `Short Call + 沽空正股`：`HK${summary['short_bucket_hkd']:,.2f}`
-  - 其中 入价 Short Call：`HK${summary['itm_short_call_hkd']:,.2f}`
-  - 其中 沽空正股：`HK${summary['stock_short_hkd']:,.2f}`
 
 **虚拟风险市值拆分**
 - `Short Put 名义风险`：`HK${summary['put_virtual_risk_hkd']:,.2f}`
