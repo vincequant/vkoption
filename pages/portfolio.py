@@ -15,6 +15,8 @@ POSITION_TYPE_CHOICES = ["short_put", "short_call", "stock_long", "stock_sell"]
 DEFAULT_PORTFOLIO_LIMIT_HKD = 30_000_000.0
 DEFAULT_USD_HKD = 7.80
 DEFAULT_CNY_HKD = 1.08
+SUPABASE_TABLE = "portfolio_state"
+SUPABASE_ROW_ID = "default"
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -193,10 +195,95 @@ def ensure_state() -> None:
         st.session_state.portfolio_limit_hkd = DEFAULT_PORTFOLIO_LIMIT_HKD
     if "include_short_side_negative" not in st.session_state:
         st.session_state.include_short_side_negative = False
+    if "storage_backend" not in st.session_state:
+        st.session_state.storage_backend = "local"
     if not st.session_state.holdings_loaded:
-        loaded = load_holdings_from_disk()
+        loaded = load_holdings()
         st.session_state.options_holdings = loaded
         st.session_state.holdings_loaded = True
+
+
+def supabase_credentials() -> tuple[str, str] | None:
+    url = str(st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))).strip().rstrip("/")
+    key = str(
+        st.secrets.get(
+            "SUPABASE_SERVICE_ROLE_KEY",
+            os.getenv("SUPABASE_SERVICE_ROLE_KEY", st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY", ""))),
+        )
+    ).strip()
+    if not url or not key:
+        return None
+    return url, key
+
+
+def apply_loaded_payload(payload: Dict) -> List[Dict]:
+    items = payload.get("holdings", [])
+    last_updated = payload.get("last_updated")
+    last_saved = payload.get("last_saved")
+    portfolio_limit_hkd = payload.get("portfolio_limit_hkd")
+    if isinstance(last_updated, str):
+        st.session_state.last_updated = last_updated
+    if isinstance(last_saved, str):
+        st.session_state.last_saved = last_saved
+    if isinstance(portfolio_limit_hkd, (int, float)):
+        st.session_state.portfolio_limit_hkd = float(portfolio_limit_hkd)
+    if not isinstance(items, list):
+        return []
+
+    cleaned = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        position_type = str(item.get("option_type") or item.get("position_type") or "short_put")
+        if position_type == "stock_from_put":
+            position_type = "stock_long"
+        if position_type not in POSITION_TYPE_CHOICES:
+            position_type = "short_put"
+        cleaned.append(
+            {
+                "id": item.get("id"),
+                "symbol": normalize_symbol(item.get("symbol", "")),
+                "market": item.get("market") or infer_market(item.get("symbol", "")),
+                "quantity": int(item.get("quantity", 1) or 1),
+                "strike_price": float(item.get("strike_price", 0) or 0),
+                "position_type": position_type,
+                "contract_multiplier": positive_int_or_default(
+                    item.get("contract_multiplier"), position_multiplier(position_type)
+                ),
+                "current_price": item.get("current_price"),
+                "created_at": item.get("created_at"),
+            }
+        )
+    return cleaned
+
+
+def load_holdings_from_supabase() -> List[Dict] | None:
+    creds = supabase_credentials()
+    if not creds:
+        return None
+    url, key = creds
+    endpoint = f"{url}/rest/v1/{SUPABASE_TABLE}"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+    }
+    params = {
+        "id": f"eq.{SUPABASE_ROW_ID}",
+        "select": "payload",
+    }
+    try:
+        resp = requests.get(endpoint, headers=headers, params=params, timeout=10)
+        if resp.status_code != 200:
+            return None
+        rows = resp.json()
+        if not isinstance(rows, list) or not rows:
+            return []
+        payload = rows[0].get("payload")
+        if not isinstance(payload, dict):
+            return []
+        return apply_loaded_payload(payload)
+    except (requests.RequestException, ValueError):
+        return None
 
 
 def load_holdings_from_disk() -> List[Dict]:
@@ -206,61 +293,65 @@ def load_holdings_from_disk() -> List[Dict]:
         payload = json.loads(STORAGE_FILE.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return []
-        items = payload.get("holdings", [])
-        last_updated = payload.get("last_updated")
-        last_saved = payload.get("last_saved")
-        portfolio_limit_hkd = payload.get("portfolio_limit_hkd")
-        if isinstance(last_updated, str):
-            st.session_state.last_updated = last_updated
-        if isinstance(last_saved, str):
-            st.session_state.last_saved = last_saved
-        if isinstance(portfolio_limit_hkd, (int, float)):
-            st.session_state.portfolio_limit_hkd = float(portfolio_limit_hkd)
-        if isinstance(items, list):
-            cleaned = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                position_type = str(item.get("option_type") or item.get("position_type") or "short_put")
-                if position_type == "stock_from_put":
-                    position_type = "stock_long"
-                if position_type not in POSITION_TYPE_CHOICES:
-                    position_type = "short_put"
-                cleaned.append(
-                    {
-                        "id": item.get("id"),
-                        "symbol": normalize_symbol(item.get("symbol", "")),
-                        "market": item.get("market") or infer_market(item.get("symbol", "")),
-                        "quantity": int(item.get("quantity", 1) or 1),
-                        "strike_price": float(item.get("strike_price", 0) or 0),
-                        "position_type": position_type,
-                        "contract_multiplier": positive_int_or_default(
-                            item.get("contract_multiplier"), position_multiplier(position_type)
-                        ),
-                        "current_price": item.get("current_price"),
-                        "created_at": item.get("created_at"),
-                    }
-                )
-            return cleaned
-        return []
+        return apply_loaded_payload(payload)
     except (json.JSONDecodeError, OSError):
         return []
 
 
-def save_holdings_to_disk() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    payload = {
+def load_holdings() -> List[Dict]:
+    supabase_loaded = load_holdings_from_supabase()
+    if supabase_loaded is not None:
+        st.session_state.storage_backend = "supabase"
+        return supabase_loaded
+    st.session_state.storage_backend = "local"
+    return load_holdings_from_disk()
+
+
+def current_payload(now_str: str) -> Dict:
+    return {
         "last_updated": st.session_state.last_updated,
         "last_saved": now_str,
         "portfolio_limit_hkd": float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD)),
         "holdings": st.session_state.options_holdings,
     }
+
+
+def save_holdings_to_supabase(payload: Dict) -> bool:
+    creds = supabase_credentials()
+    if not creds:
+        return False
+    url, key = creds
+    endpoint = f"{url}/rest/v1/{SUPABASE_TABLE}"
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    params = {"on_conflict": "id"}
+    body = [{"id": SUPABASE_ROW_ID, "payload": payload}]
+    try:
+        resp = requests.post(endpoint, headers=headers, params=params, json=body, timeout=10)
+        return resp.status_code in {200, 201, 204}
+    except requests.RequestException:
+        return False
+
+
+def save_holdings_to_disk() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    payload = current_payload(now_str)
+    if save_holdings_to_supabase(payload):
+        st.session_state.last_saved = now_str
+        st.session_state.storage_backend = "supabase"
+        return
+
     STORAGE_FILE.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     st.session_state.last_saved = now_str
+    st.session_state.storage_backend = "local"
 
 
 def fetch_prices_from_fmp(items: List[Dict], api_key: str) -> Dict[str, float]:
@@ -607,6 +698,9 @@ with st.sidebar:
     if float(limit_val) != float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD)):
         st.session_state.portfolio_limit_hkd = float(limit_val)
         save_holdings_to_disk()
+    backend = st.session_state.get("storage_backend", "local")
+    backend_text = "Supabase 持久化" if backend == "supabase" else "本地文件（Reboot 会丢失）"
+    st.caption(f"存储方式：{backend_text}")
 
 summary = portfolio_summary(
     st.session_state.options_holdings,
