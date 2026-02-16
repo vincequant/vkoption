@@ -45,12 +45,12 @@ def market_currency_symbol(market: str) -> str:
 
 def position_type_label(position_type: str) -> str:
     labels = {
-        "short_put": "Short Put (卖出看跌)",
+        "short_put": "ShortPut",
         "short_call": "Short Call (卖出看涨)",
         "stock_long": "正股（买入）",
         "stock_sell": "正股（卖出）",
     }
-    return labels.get(position_type, "Short Put (卖出看跌)")
+    return labels.get(position_type, "ShortPut")
 
 
 def market_label(market: str) -> str:
@@ -160,6 +160,24 @@ def stock_value_hkd(item: Dict) -> float:
     strike = float(item.get("strike_price", 0) or 0)
     price = float(current) if isinstance(current, (int, float)) else strike
     return price * qty * direction * market_to_hkd_rate(market)
+
+
+def holding_value_for_sort_hkd(item: Dict) -> float:
+    position_type = item.get("position_type", "short_put")
+    if position_type == "short_put":
+        return abs(short_put_assignment_hkd(item))
+    if position_type == "short_call":
+        return abs(option_notional_hkd(item))
+    return abs(stock_value_hkd(item))
+
+
+def holding_value_label_hkd(item: Dict) -> tuple[str, float]:
+    position_type = item.get("position_type", "short_put")
+    if position_type == "short_put":
+        return "Short接盘市值(HKD)", abs(short_put_assignment_hkd(item))
+    if position_type == "short_call":
+        return "Short名义市值(HKD)", abs(option_notional_hkd(item))
+    return "正股现价市值(HKD)", abs(stock_value_hkd(item))
 
 
 def fmp_symbol_candidates(symbol: str, market: str) -> List[str]:
@@ -892,7 +910,18 @@ st.subheader("持仓明细")
 if not st.session_state.options_holdings:
     st.info("暂无持仓。先添加一条持仓。")
 else:
-    for item in st.session_state.options_holdings:
+    sort_mode = st.selectbox(
+        "市值排序",
+        options=["默认顺序", "市值从高到低", "市值从低到高"],
+        index=0,
+        key="holding_sort_mode",
+    )
+    holdings_to_show = list(st.session_state.options_holdings)
+    if sort_mode != "默认顺序":
+        reverse = sort_mode == "市值从高到低"
+        holdings_to_show = sorted(holdings_to_show, key=holding_value_for_sort_hkd, reverse=reverse)
+
+    for item in holdings_to_show:
         symbol = item["symbol"]
         qty = float(item["quantity"])
         strike = float(item["strike_price"])
@@ -908,19 +937,21 @@ else:
         distance_text = "--" if distance_pct is None else f"{distance_pct:+.2f}%"
         assignment_value = strike * qty * multiplier * direction
         virtual_risk = option_notional_hkd(item)
+        value_label, value_hkd = holding_value_label_hkd(item)
         risk_put = is_itm_short_put(item)
         risk_call = is_itm_short_call(item)
         qty_unit = "手" if position_type in {"short_put", "short_call"} else "股"
 
         expander_title = (
             f"{symbol} | {position_type_label(position_type)} | "
-            f"{currency}{strike:,.2f} x {int(qty)}{qty_unit}"
+            f"{currency}{strike:,.2f} x {int(qty)}{qty_unit} | HK${value_hkd:,.0f}"
         )
         with st.expander(expander_title, expanded=False):
             st.write(f"市场: `{item['market'].upper()}`")
             st.write(f"最新价: `{currency}{current:,.2f}`" if isinstance(current, (int, float)) else "最新价: `--`")
             st.write(f"最新价距成本/行权价: `{distance_text}`")
             st.write(f"名义成本市值: `{currency}{assignment_value:,.2f}`")
+            st.write(f"{value_label}: `HK${value_hkd:,.2f}`")
             st.write(f"合约乘数: `{multiplier}`")
             st.write(f"虚拟风险市值(HKD): `HK${virtual_risk:,.2f}`")
             st.write("风险状态:")
