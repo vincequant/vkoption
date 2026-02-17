@@ -807,13 +807,19 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
             format_func=position_type_label,
         )
         quantity = st.number_input("数量（期权填手数，股票填股数）", min_value=1, value=1, step=1)
+        mult_title_col, mult_toggle_col = st.columns([0.78, 0.22])
+        with mult_title_col:
+            st.caption("期权乘数（默认100）")
+        with mult_toggle_col:
+            enable_multiplier_edit = st.toggle("开启", value=False, key="enable_add_multiplier_edit")
         contract_multiplier = st.number_input(
-            "期权乘数（默认100，可手动修改）",
+            "期权乘数",
             min_value=1,
             value=OPTION_CONTRACT_SIZE,
             step=1,
-            help="仅对 Short Put / Short Call 生效；正股类型固定按 1 计算。",
-            disabled=(position_type in {"stock_long", "stock_sell"}),
+            help="需先打开右侧“开启”才可修改。仅对 Short Put / Short Call 生效。",
+            disabled=(position_type in {"stock_long", "stock_sell"} or not enable_multiplier_edit),
+            label_visibility="collapsed",
         )
         strike_price = st.number_input("行权价 / 成本价", min_value=0.01, value=100.0, step=0.01)
         submitted = st.form_submit_button("添加持仓")
@@ -821,7 +827,11 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
             if not normalize_symbol(symbol):
                 st.error("请输入标的代码。")
             else:
-                effective_multiplier = int(contract_multiplier) if position_type in {"short_put", "short_call"} else 1
+                effective_multiplier = (
+                    int(contract_multiplier)
+                    if (position_type in {"short_put", "short_call"} and enable_multiplier_edit)
+                    else (OPTION_CONTRACT_SIZE if position_type in {"short_put", "short_call"} else 1)
+                )
                 allowed, warning_msg = check_portfolio_limit_for_new_holding(
                     symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier
                 )
@@ -1010,6 +1020,15 @@ else:
                     format_func=market_label,
                     key=f"market_{item['id']}",
                 )
+                edit_mult_title_col, edit_mult_toggle_col = st.columns([0.78, 0.22])
+                with edit_mult_title_col:
+                    st.caption("修改期权乘数")
+                with edit_mult_toggle_col:
+                    enable_edit_multiplier = st.toggle(
+                        "开启",
+                        value=False,
+                        key=f"enable_multiplier_{item['id']}",
+                    )
                 new_multiplier = st.number_input(
                     "修改期权乘数",
                     min_value=1,
@@ -1017,7 +1036,8 @@ else:
                     step=1,
                     key=f"multiplier_{item['id']}",
                     help="仅对 Short Put / Short Call 生效；正股类型固定按 1 计算。",
-                    disabled=(new_type in {"stock_long", "stock_sell"}),
+                    disabled=(new_type in {"stock_long", "stock_sell"} or not enable_edit_multiplier),
+                    label_visibility="collapsed",
                 )
                 save_col, del_col = st.columns(2)
                 with save_col:
@@ -1030,7 +1050,15 @@ else:
                     item["strike_price"] = float(new_strike)
                     item["position_type"] = new_type
                     item["market"] = new_market
-                    item["contract_multiplier"] = int(new_multiplier) if new_type in {"short_put", "short_call"} else 1
+                    if new_type in {"short_put", "short_call"}:
+                        if enable_edit_multiplier:
+                            item["contract_multiplier"] = int(new_multiplier)
+                        elif position_type in {"short_put", "short_call"}:
+                            item["contract_multiplier"] = int(item_contract_multiplier(item))
+                        else:
+                            item["contract_multiplier"] = OPTION_CONTRACT_SIZE
+                    else:
+                        item["contract_multiplier"] = 1
                     save_holdings_to_disk()
                     st.success("已更新。")
                     st.rerun()
