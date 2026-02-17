@@ -838,11 +838,14 @@ if st.button("更新价格", use_container_width=True):
 
 with st.expander("港元目标持仓计算器", expanded=False):
     calc_symbol = st.text_input("标的代码（用于换算）", value="NVDA")
-    target_hkd = st.number_input("目标持仓（HKD）", min_value=1000.0, value=500000.0, step=1000.0)
+    target_hkd = st.number_input("目标持仓（HKD）", min_value=100_000.0, value=1_000_000.0, step=1_000_000.0)
     calc_market = infer_market(calc_symbol)
     st.caption(f"识别市场：`{calc_market.upper()}`")
-    default_price = 0.0
     normalized_calc_symbol = normalize_symbol(calc_symbol)
+    is_inverse_symbol = normalized_calc_symbol == "VXX"
+    if is_inverse_symbol:
+        st.caption("`VXX` 已启用反向结算（反股票 Delta）。")
+    default_price = 0.0
     for h in st.session_state.options_holdings:
         if normalize_symbol(h.get("symbol", "")) == normalized_calc_symbol and isinstance(h.get("current_price"), (int, float)):
             default_price = float(h["current_price"])
@@ -898,17 +901,23 @@ with st.expander("港元目标持仓计算器", expanded=False):
         else:
             hkd_per_share = calc_price
 
-        raw_shares = target_hkd / hkd_per_share if hkd_per_share > 0 else 0.0
-        shares_floor = int(raw_shares)
-        shares_ceil = int(raw_shares) if raw_shares.is_integer() else int(raw_shares) + 1
-        short_put_lots = raw_shares / OPTION_CONTRACT_SIZE
+        effective_target_hkd = -target_hkd if is_inverse_symbol else target_hkd
+        raw_shares = effective_target_hkd / hkd_per_share if hkd_per_share > 0 else 0.0
+        abs_raw_shares = abs(raw_shares)
+        shares_floor = int(abs_raw_shares)
+        shares_ceil = int(abs_raw_shares) if abs_raw_shares.is_integer() else int(abs_raw_shares) + 1
+        short_put_lots = abs_raw_shares / OPTION_CONTRACT_SIZE
+        direction_text = "做空" if raw_shares < 0 else "做多"
+        signed_floor = -shares_floor if raw_shares < 0 else shares_floor
+        signed_ceil = -shares_ceil if raw_shares < 0 else shares_ceil
 
         st.markdown(
             f"""
 **换算结果**
 - 每股折合：`HK${hkd_per_share:,.2f}`
-- 建议持股（向下取整）：`{shares_floor:,}` 股
-- 若要覆盖目标（向上取整）：`{shares_ceil:,}` 股
+- 方向：`{direction_text}`
+- 建议持股（向下取整）：`{signed_floor:,}` 股
+- 若要覆盖目标（向上取整）：`{signed_ceil:,}` 股
 - Short Put 手数参考（100股/手）：`{short_put_lots:.2f}` 手（约 `~{int(round(short_put_lots))}` 手）
 """
         )
