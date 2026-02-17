@@ -18,10 +18,19 @@ DEFAULT_USD_HKD = 7.80
 DEFAULT_CNY_HKD = 1.08
 SUPABASE_TABLE = "portfolio_state"
 SUPABASE_ROW_ID = "default"
+INVERSE_DELTA_SYMBOLS = {"VXX"}
 
 
 def normalize_symbol(symbol: str) -> str:
     return str(symbol or "").strip().upper()
+
+
+def is_inverse_delta_symbol(symbol: str) -> bool:
+    return normalize_symbol(symbol) in INVERSE_DELTA_SYMBOLS
+
+
+def risk_direction_factor(item: Dict) -> int:
+    return -1 if is_inverse_delta_symbol(item.get("symbol", "")) else 1
 
 
 def infer_market(symbol: str) -> str:
@@ -116,7 +125,7 @@ def short_put_assignment_hkd(item: Dict) -> float:
     qty = float(item.get("quantity", 0) or 0)
     strike = float(item.get("strike_price", 0) or 0)
     market = item.get("market") or infer_market(item.get("symbol", ""))
-    return strike * qty * item_contract_multiplier(item) * market_to_hkd_rate(market)
+    return strike * qty * item_contract_multiplier(item) * market_to_hkd_rate(market) * risk_direction_factor(item)
 
 
 def short_put_assignment_total_hkd(holdings: List[Dict]) -> float:
@@ -130,7 +139,7 @@ def option_notional_hkd(item: Dict) -> float:
     qty = float(item.get("quantity", 0) or 0)
     strike = float(item.get("strike_price", 0) or 0)
     market = item.get("market") or infer_market(item.get("symbol", ""))
-    return strike * qty * item_contract_multiplier(item) * market_to_hkd_rate(market)
+    return strike * qty * item_contract_multiplier(item) * market_to_hkd_rate(market) * risk_direction_factor(item)
 
 
 def is_itm_short_put(item: Dict) -> bool:
@@ -159,7 +168,7 @@ def stock_value_hkd(item: Dict) -> float:
     current = item.get("current_price")
     strike = float(item.get("strike_price", 0) or 0)
     price = float(current) if isinstance(current, (int, float)) else strike
-    return price * qty * direction * market_to_hkd_rate(market)
+    return price * qty * direction * market_to_hkd_rate(market) * risk_direction_factor(item)
 
 
 def holding_value_for_sort_hkd(item: Dict) -> float:
@@ -490,10 +499,14 @@ def portfolio_summary(holdings: List[Dict], include_short_side_negative: bool = 
     put_virtual_risk_hkd = 0.0
     call_virtual_risk_hkd = 0.0
     short_stock_virtual_hkd = 0.0
+    inverse_stock_hedge_hkd = 0.0
     for item in holdings:
         position_type = item.get("position_type", "short_put")
         if position_type == "stock_long":
-            stock_long_hkd += abs(stock_value_hkd(item))
+            stock_val = stock_value_hkd(item)
+            stock_long_hkd += abs(stock_val)
+            if stock_val < 0:
+                inverse_stock_hedge_hkd += stock_val
         elif position_type == "stock_sell":
             short_abs = abs(stock_value_hkd(item))
             stock_short_hkd += short_abs
@@ -509,10 +522,10 @@ def portfolio_summary(holdings: List[Dict], include_short_side_negative: bool = 
 
     if include_short_side_negative:
         total_value_hkd = stock_long_hkd + itm_short_put_hkd - itm_short_call_hkd - stock_short_hkd
-        virtual_risk_hkd = put_virtual_risk_hkd - call_virtual_risk_hkd - short_stock_virtual_hkd
+        virtual_risk_hkd = put_virtual_risk_hkd - call_virtual_risk_hkd - short_stock_virtual_hkd + inverse_stock_hedge_hkd
     else:
         total_value_hkd = stock_long_hkd + itm_short_put_hkd
-        virtual_risk_hkd = put_virtual_risk_hkd
+        virtual_risk_hkd = put_virtual_risk_hkd + inverse_stock_hedge_hkd
 
     return {
         "total_value_hkd": total_value_hkd,
@@ -522,6 +535,7 @@ def portfolio_summary(holdings: List[Dict], include_short_side_negative: bool = 
         "put_virtual_risk_hkd": put_virtual_risk_hkd,
         "call_virtual_risk_hkd": call_virtual_risk_hkd,
         "short_stock_virtual_hkd": short_stock_virtual_hkd,
+        "inverse_stock_hedge_hkd": inverse_stock_hedge_hkd,
         "stock_long_hkd": stock_long_hkd,
         "stock_short_hkd": stock_short_hkd,
         "long_bucket_hkd": stock_long_hkd + itm_short_put_hkd,
@@ -786,6 +800,7 @@ with st.expander("虚拟风险拆分明细 (HKD)", expanded=False):
 - `Short Put 名义风险`：`HK${summary['put_virtual_risk_hkd']:,.2f}`
 - `Short Call 名义风险`：`HK${summary['call_virtual_risk_hkd']:,.2f}`
 - `沽空正股虚拟值`：`HK${summary['short_stock_virtual_hkd']:,.2f}`
+- `反向正股对冲值 (如VXX)`：`HK${summary['inverse_stock_hedge_hkd']:,.2f}`
 - `最终虚拟风险市值`：`HK${summary['virtual_risk_hkd']:,.2f}`
 """
     )
