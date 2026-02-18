@@ -630,6 +630,34 @@ def check_portfolio_limit_for_new_holding(
     )
 
 
+def check_virtual_risk_limit_transition(
+    current_holdings: List[Dict],
+    projected_holdings: List[Dict],
+) -> tuple[bool, str]:
+    portfolio_limit_hkd = float(st.session_state.get("portfolio_limit_hkd", DEFAULT_PORTFOLIO_LIMIT_HKD))
+    include_short_side_negative = bool(st.session_state.get("include_short_side_negative", False))
+    current_risk = float(
+        portfolio_summary(current_holdings, include_short_side_negative=include_short_side_negative)["virtual_risk_hkd"]
+    )
+    projected_risk = float(
+        portfolio_summary(projected_holdings, include_short_side_negative=include_short_side_negative)["virtual_risk_hkd"]
+    )
+
+    if projected_risk <= portfolio_limit_hkd:
+        return True, ""
+    if projected_risk <= current_risk:
+        return True, ""
+
+    return (
+        False,
+        (
+            f"预计虚拟风险市值将升至 HK${projected_risk:,.0f}，超过上限 HK${portfolio_limit_hkd:,.0f}。\n"
+            f"当前虚拟风险市值：HK${current_risk:,.0f}。\n"
+            "已拦截本次操作：请先降低仓位风险或提高组合上限。"
+        ),
+    )
+
+
 def update_prices() -> None:
     holdings = st.session_state.options_holdings
     if not holdings:
@@ -847,15 +875,31 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
                     if (position_type in {"short_put", "short_call"} and enable_multiplier_edit)
                     else (OPTION_CONTRACT_SIZE if position_type in {"short_put", "short_call"} else 1)
                 )
-                allowed, warning_msg = check_portfolio_limit_for_new_holding(
-                    symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier
+                projected_item = {
+                    "symbol": normalize_symbol(symbol),
+                    "market": market if market in MARKET_CHOICES else infer_market(symbol),
+                    "quantity": int(quantity),
+                    "strike_price": float(strike_price),
+                    "position_type": position_type,
+                    "contract_multiplier": int(effective_multiplier),
+                    "current_price": None,
+                }
+                projected_holdings = [dict(item) for item in st.session_state.options_holdings] + [projected_item]
+                risk_allowed, risk_msg = check_virtual_risk_limit_transition(
+                    st.session_state.options_holdings, projected_holdings
                 )
-                if not allowed:
-                    st.warning(warning_msg)
+                if not risk_allowed:
+                    st.error(risk_msg)
                 else:
-                    add_holding(symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier)
-                    st.success("已添加持仓。")
-                    st.rerun()
+                    allowed, warning_msg = check_portfolio_limit_for_new_holding(
+                        symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier
+                    )
+                    if not allowed:
+                        st.warning(warning_msg)
+                    else:
+                        add_holding(symbol, market, int(quantity), float(strike_price), position_type, effective_multiplier)
+                        st.success("已添加持仓。")
+                        st.rerun()
 
 if st.button("更新价格", use_container_width=True):
     update_prices()
@@ -1093,22 +1137,38 @@ else:
                     delete_clicked = st.form_submit_button("删除持仓")
 
                 if save_clicked:
-                    item["quantity"] = int(new_qty)
-                    item["strike_price"] = float(new_strike)
-                    item["position_type"] = new_type
-                    item["market"] = new_market
+                    effective_new_multiplier = 1
                     if new_type in {"short_put", "short_call"}:
                         if enable_edit_multiplier:
-                            item["contract_multiplier"] = int(new_multiplier)
+                            effective_new_multiplier = int(new_multiplier)
                         elif position_type in {"short_put", "short_call"}:
-                            item["contract_multiplier"] = int(item_contract_multiplier(item))
+                            effective_new_multiplier = int(item_contract_multiplier(item))
                         else:
-                            item["contract_multiplier"] = OPTION_CONTRACT_SIZE
+                            effective_new_multiplier = OPTION_CONTRACT_SIZE
+
+                    projected_holdings = [dict(h) for h in st.session_state.options_holdings]
+                    for projected_item in projected_holdings:
+                        if projected_item.get("id") == item["id"]:
+                            projected_item["quantity"] = int(new_qty)
+                            projected_item["strike_price"] = float(new_strike)
+                            projected_item["position_type"] = new_type
+                            projected_item["market"] = new_market
+                            projected_item["contract_multiplier"] = int(effective_new_multiplier)
+                            break
+                    risk_allowed, risk_msg = check_virtual_risk_limit_transition(
+                        st.session_state.options_holdings, projected_holdings
+                    )
+                    if not risk_allowed:
+                        st.error(risk_msg)
                     else:
-                        item["contract_multiplier"] = 1
-                    save_holdings_to_disk()
-                    st.success("已更新。")
-                    st.rerun()
+                        item["quantity"] = int(new_qty)
+                        item["strike_price"] = float(new_strike)
+                        item["position_type"] = new_type
+                        item["market"] = new_market
+                        item["contract_multiplier"] = int(effective_new_multiplier)
+                        save_holdings_to_disk()
+                        st.success("已更新。")
+                        st.rerun()
                 if delete_clicked:
                     remove_holding(item["id"])
                     st.warning("已删除该持仓。")
