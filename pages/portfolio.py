@@ -949,6 +949,38 @@ with st.expander("港元目标持仓计算器", expanded=False):
     else:
         st.info("请先输入或读取有效价格。")
 
+with st.expander("IBIT持仓计算器", expanded=False):
+    target_usd = st.number_input("目标持仓（USD）", min_value=1_000.0, value=100_000.0, step=1_000.0)
+    st.caption("价格来源：`最新价`（IBIT）")
+
+    if st.button("读取IBIT最新价", use_container_width=True):
+        api_key = st.session_state.get("fmp_api_key", "").strip()
+        latest = fetch_single_price("IBIT", "us", api_key)
+        if latest is None:
+            st.warning("未获取到 IBIT 最新价，请稍后重试。")
+        else:
+            st.session_state["ibit_latest_price"] = latest
+            st.success(f"已获取 IBIT 最新价：{latest:.4f}")
+            st.rerun()
+
+    ibit_latest_price = st.session_state.get("ibit_latest_price")
+    if isinstance(ibit_latest_price, (int, float)) and float(ibit_latest_price) > 0:
+        ibit_latest_price = float(ibit_latest_price)
+        raw_shares = target_usd / ibit_latest_price
+        shares_floor = int(raw_shares)
+        shares_ceil = int(raw_shares) if raw_shares.is_integer() else int(raw_shares) + 1
+        st.markdown(
+            f"""
+**换算结果**
+- 最新价：`${ibit_latest_price:,.4f}`
+- 目标持仓：`${target_usd:,.2f}`
+- 建议持股（向下取整）：`{shares_floor:,}` 股
+- 若要覆盖目标（向上取整）：`{shares_ceil:,}` 股
+"""
+        )
+    else:
+        st.info("当前未缓存 IBIT 最新价，请先点击“读取IBIT最新价”。")
+
 st.subheader("持仓明细")
 if not st.session_state.options_holdings:
     st.info("暂无持仓。先添加一条持仓。")
