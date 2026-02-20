@@ -993,37 +993,44 @@ with st.expander("港元目标持仓计算器", expanded=False):
     else:
         st.info("请先输入或读取有效价格。")
 
-with st.expander("BOXX持仓计算器", expanded=False):
+with st.expander("底仓计算器", expanded=False):
+    base_symbol = st.selectbox("标的", options=["BOXX", "TLT", "IBIT"], index=0, key="base_calc_symbol")
     target_usd = st.number_input("目标持仓（USD）", min_value=1_000.0, value=100_000.0, step=1_000.0)
-    st.caption("价格来源：`最新价`（BOXX）")
+    st.caption(f"价格来源：`最新价`（{base_symbol}）")
 
-    if st.button("读取BOXX最新价", use_container_width=True):
+    if st.button("读取最新价", use_container_width=True):
         api_key = st.session_state.get("fmp_api_key", "").strip()
-        latest = fetch_single_price("BOXX", "us", api_key)
+        latest = fetch_single_price(base_symbol, "us", api_key)
         if latest is None:
-            st.warning("未获取到 BOXX 最新价，请稍后重试。")
+            st.warning(f"未获取到 {base_symbol} 最新价，请稍后重试。")
         else:
-            st.session_state["boxx_latest_price"] = latest
-            st.success(f"已获取 BOXX 最新价：{latest:.4f}")
+            cache = st.session_state.get("base_calc_latest_price_map", {})
+            if not isinstance(cache, dict):
+                cache = {}
+            cache[base_symbol] = float(latest)
+            st.session_state["base_calc_latest_price_map"] = cache
+            st.success(f"已获取 {base_symbol} 最新价：{latest:.4f}")
             st.rerun()
 
-    boxx_latest_price = st.session_state.get("boxx_latest_price")
-    if isinstance(boxx_latest_price, (int, float)) and float(boxx_latest_price) > 0:
-        boxx_latest_price = float(boxx_latest_price)
-        raw_shares = target_usd / boxx_latest_price
+    latest_price_map = st.session_state.get("base_calc_latest_price_map", {})
+    symbol_latest_price = latest_price_map.get(base_symbol) if isinstance(latest_price_map, dict) else None
+    if isinstance(symbol_latest_price, (int, float)) and float(symbol_latest_price) > 0:
+        symbol_latest_price = float(symbol_latest_price)
+        raw_shares = target_usd / symbol_latest_price
         shares_floor = int(raw_shares)
         shares_ceil = int(raw_shares) if raw_shares.is_integer() else int(raw_shares) + 1
         st.markdown(
             f"""
 **换算结果**
-- 最新价：`${boxx_latest_price:,.4f}`
+- 标的：`{base_symbol}`
+- 最新价：`${symbol_latest_price:,.4f}`
 - 目标持仓：`${target_usd:,.2f}`
 - 建议持股（向下取整）：`{shares_floor:,}` 股
 - 若要覆盖目标（向上取整）：`{shares_ceil:,}` 股
 """
         )
     else:
-        st.info("当前未缓存 BOXX 最新价，请先点击“读取BOXX最新价”。")
+        st.info(f"当前未缓存 {base_symbol} 最新价，请先点击“读取最新价”。")
 
 st.subheader("持仓明细")
 if not st.session_state.options_holdings:
