@@ -850,18 +850,13 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
             format_func=position_type_label,
         )
         quantity = st.number_input("数量（期权填手数，股票填股数）", min_value=1, value=1, step=1)
-        mult_title_col, mult_toggle_col = st.columns([0.78, 0.22])
-        with mult_title_col:
-            st.caption("期权乘数（默认100）")
-        with mult_toggle_col:
-            enable_multiplier_edit = st.toggle("开启", value=False, key="enable_add_multiplier_edit")
+        st.caption("期权乘数（仅期权类型生效，默认100）")
         contract_multiplier = st.number_input(
             "期权乘数",
             min_value=1,
             value=OPTION_CONTRACT_SIZE,
             step=1,
-            help="需先打开右侧“开启”才可修改。仅对 Short Put / Short Call 生效。",
-            disabled=(position_type in {"stock_long", "stock_sell"} or not enable_multiplier_edit),
+            help="仅对 Short Put / Short Call 生效；正股类型会自动按 1 处理。",
             label_visibility="collapsed",
         )
         strike_price = st.number_input("行权价 / 成本价", min_value=0.01, value=100.0, step=0.01)
@@ -871,9 +866,7 @@ with st.expander("新增持仓", expanded=len(st.session_state.options_holdings)
                 st.error("请输入标的代码。")
             else:
                 effective_multiplier = (
-                    int(contract_multiplier)
-                    if (position_type in {"short_put", "short_call"} and enable_multiplier_edit)
-                    else (OPTION_CONTRACT_SIZE if position_type in {"short_put", "short_call"} else 1)
+                    int(contract_multiplier) if position_type in {"short_put", "short_call"} else 1
                 )
                 projected_item = {
                     "symbol": normalize_symbol(symbol),
@@ -1118,15 +1111,7 @@ else:
                     format_func=market_label,
                     key=f"market_{item['id']}",
                 )
-                edit_mult_title_col, edit_mult_toggle_col = st.columns([0.78, 0.22])
-                with edit_mult_title_col:
-                    st.caption("修改期权乘数")
-                with edit_mult_toggle_col:
-                    enable_edit_multiplier = st.toggle(
-                        "开启",
-                        value=False,
-                        key=f"enable_multiplier_{item['id']}",
-                    )
+                st.caption("修改期权乘数（仅期权类型生效）")
                 new_multiplier = st.number_input(
                     "修改期权乘数",
                     min_value=1,
@@ -1134,7 +1119,6 @@ else:
                     step=1,
                     key=f"multiplier_{item['id']}",
                     help="仅对 Short Put / Short Call 生效；正股类型固定按 1 计算。",
-                    disabled=(new_type in {"stock_long", "stock_sell"} or not enable_edit_multiplier),
                     label_visibility="collapsed",
                 )
                 save_col, del_col = st.columns(2)
@@ -1146,12 +1130,7 @@ else:
                 if save_clicked:
                     effective_new_multiplier = 1
                     if new_type in {"short_put", "short_call"}:
-                        if enable_edit_multiplier:
-                            effective_new_multiplier = int(new_multiplier)
-                        elif position_type in {"short_put", "short_call"}:
-                            effective_new_multiplier = int(item_contract_multiplier(item))
-                        else:
-                            effective_new_multiplier = OPTION_CONTRACT_SIZE
+                        effective_new_multiplier = int(new_multiplier)
 
                     projected_holdings = [dict(h) for h in st.session_state.options_holdings]
                     for projected_item in projected_holdings:
