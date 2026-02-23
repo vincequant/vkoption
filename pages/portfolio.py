@@ -239,6 +239,8 @@ def ensure_state() -> None:
         st.session_state.include_short_side_negative = False
     if "storage_backend" not in st.session_state:
         st.session_state.storage_backend = "local"
+    if "selected_holding_ids" not in st.session_state:
+        st.session_state.selected_holding_ids = []
     if not st.session_state.holdings_loaded:
         loaded = load_holdings()
         st.session_state.options_holdings = loaded
@@ -1040,6 +1042,43 @@ else:
         reverse = sort_mode == "市值从高到低"
         holdings_to_show = sorted(holdings_to_show, key=holding_value_for_sort_hkd, reverse=reverse)
 
+    all_holding_ids = [item["id"] for item in holdings_to_show]
+    valid_id_set = set(all_holding_ids)
+    selected_holding_ids = [hid for hid in st.session_state.get("selected_holding_ids", []) if hid in valid_id_set]
+    st.session_state.selected_holding_ids = selected_holding_ids
+    selected_holding_set = set(selected_holding_ids)
+
+    select_all_col, clear_all_col, batch_del_col = st.columns(3)
+    with select_all_col:
+        if st.button("全选", use_container_width=True, key="btn_select_all_holdings"):
+            st.session_state.selected_holding_ids = list(all_holding_ids)
+            for hid in all_holding_ids:
+                st.session_state[f"select_holding_{hid}"] = True
+            st.rerun()
+    with clear_all_col:
+        if st.button("取消全选", use_container_width=True, key="btn_clear_all_holdings"):
+            st.session_state.selected_holding_ids = []
+            for hid in all_holding_ids:
+                st.session_state[f"select_holding_{hid}"] = False
+            st.rerun()
+    with batch_del_col:
+        if st.button("批量删除", use_container_width=True, key="btn_batch_delete_holdings"):
+            ids_to_delete = set(st.session_state.get("selected_holding_ids", []))
+            if not ids_to_delete:
+                st.warning("请先勾选要删除的持仓。")
+            else:
+                st.session_state.options_holdings = [
+                    item for item in st.session_state.options_holdings if item["id"] not in ids_to_delete
+                ]
+                save_holdings_to_disk()
+                st.session_state.selected_holding_ids = []
+                for hid in ids_to_delete:
+                    st.session_state[f"select_holding_{hid}"] = False
+                st.warning(f"已批量删除 {len(ids_to_delete)} 条持仓。")
+                st.rerun()
+
+    st.caption(f"已选择 {len(st.session_state.selected_holding_ids)} / {len(all_holding_ids)} 条持仓")
+
     for item in holdings_to_show:
         symbol = item["symbol"]
         qty = float(item["quantity"])
@@ -1065,6 +1104,17 @@ else:
             f"{symbol} | {position_type_label(position_type)} | "
             f"{currency}{strike:,.2f} x {int(qty)}{qty_unit} | {colored_hkd_markdown(value_hkd)}"
         )
+        selected = st.checkbox(
+            f"选择 {symbol}",
+            value=item["id"] in selected_holding_set,
+            key=f"select_holding_{item['id']}",
+        )
+        if selected and item["id"] not in selected_holding_set:
+            selected_holding_set.add(item["id"])
+        if not selected and item["id"] in selected_holding_set:
+            selected_holding_set.remove(item["id"])
+        st.session_state.selected_holding_ids = [hid for hid in all_holding_ids if hid in selected_holding_set]
+
         with st.expander(expander_title, expanded=False):
             st.write(f"市场: `{item['market'].upper()}`")
             st.write(f"最新价: `{currency}{current:,.2f}`" if isinstance(current, (int, float)) else "最新价: `--`")
@@ -1157,5 +1207,9 @@ else:
                         st.rerun()
                 if delete_clicked:
                     remove_holding(item["id"])
+                    st.session_state.selected_holding_ids = [
+                        hid for hid in st.session_state.get("selected_holding_ids", []) if hid != item["id"]
+                    ]
+                    st.session_state[f"select_holding_{item['id']}"] = False
                     st.warning("已删除该持仓。")
                     st.rerun()
